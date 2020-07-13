@@ -4,17 +4,26 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@master
+    - run: ls -R
+    # Download the repo
+    - name: Checkout repo
+      uses: actions/checkout@master
+    - run: ls -R
+
+    # Crete zip file
     - name: Archive Release
       uses: thedoctor0/zip-release@master
       with:
         filename: 'release1.zip'
         exclusions: '*.git* /*node_modules/* .editorconfig'
+    - run: ls -R
 
     # Upload as an artifact of the current workflow
     - name: Upload build zip artifact
       uses: actions/upload-artifact@v1
       with:
         name: release1.zip
+        path: release1.zip
+    - run: ls -R
 
         
