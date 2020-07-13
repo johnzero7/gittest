@@ -16,5 +16,5 @@ jobs:
       uses: actions/upload-artifact@v1
       with:
         name: release2.zip
-        path: release3.zip
+        path: release2.zip
         
