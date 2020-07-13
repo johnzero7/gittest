@@ -22,7 +22,6 @@ jobs:
     - name: Upload build zip artifact
       uses: actions/upload-artifact@v1
       with:
-        name: fileeee
         path: release1.zip
     - run: ls -R
 
