@@ -1,31 +1,40 @@
-# This workflows will upload a Python Package using Twine when a release is created
-# For more information see: https://help.github.com/en/actions/language-and-framework-guides/using-python-with-github-actions#publishing-to-package-registries
-
-name: Upload Python Package
-
+name: Create Release Assets
 on:
-  release:
-    types: [created]
+  release: 
+    types: 
+      - published
 
 jobs:
-  deploy:
-
+  build:
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v2
-    - name: Set up Python
-      uses: actions/setup-python@v2
+    # Download the repo
+    - name: Checkout repo
+      uses: actions/checkout@master
+
+    # Crete zip file
+    - name: Archive Release
+      uses: thedoctor0/zip-release@master
       with:
-        python-version: '3.x'
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install setuptools wheel twine
-    - name: Build and publish
+        filename: release1.zip
+        exclusions: '*.git* /*node_modules/* .editorconfig'
+
+    # Upload as an artifact of the current workflow
+    - name: Upload build zip artifact
+      uses: actions/upload-artifact@v2
+      with:
+        path: ./
+    - run: ls -R
+
+    # Upload Release
+    - name: Upload Release Asset
+      id: upload-release-asset 
+      uses: actions/upload-release-asset@v1
       env:
-        TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
-        TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
-      run: |
-        python setup.py sdist bdist_wheel
-        twine upload dist/*
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        #upload_url: ${{ steps.create_release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps 
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: ./release1.zip
+        asset_name: ${{ github.event.repository.name }}.zip
+        asset_content_type: application/zip
