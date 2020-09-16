@@ -1,5 +1,16 @@
 name: Create Archive
-on: [push]
+on:
+  #push:
+  #  tags:
+  #    - 'v*'
+  release: 
+    types: 
+      - published
+
+  
+
+    
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -23,16 +34,16 @@ jobs:
     - run: ls -R
 
     # Create Release
-    - name: Create Release
-      id: create_release
-      uses: actions/create-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ github.ref }}
-        release_name: Release ${{ github.ref }}
-        draft: false
-        prerelease: false
+    #- name: Create Release
+    #  id: create_release
+    #  uses: actions/create-release@v1
+    #  env:
+    #    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #  with:
+    #    tag_name: ${{ github.ref }}
+    #    release_name: Release ${{ github.ref }}
+    #    draft: false
+    #    prerelease: false
 
     # Upload Release
     - name: Upload Release Asset
@@ -41,7 +52,8 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps 
+        #upload_url: ${{ steps.create_release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps 
+        upload_url: ${{ github.event.release.upload_url }}
         asset_path: ./release1.zip
-        asset_name: my-artifact.zip
+        asset_name: ${{ github.event.repository.name }}.zip
         asset_content_type: application/zip
