@@ -1,0 +1,385 @@
+#!/usr/bin/python3
+# +
+# This script generates a release archive from a Git repo commit. For
+# repeatability, the timestamp and contents for each file are taken
+# from the last commit at or before the specified one that affects
+# that file.
+#
+# Invoke this script as follows:
+#
+#     zip-dist [«options»] «basename» «commit» [«file»|«dir»...]
+#
+# where «basename» is the base output name of the archive to create,
+# without the .zip extension, and «commit» is any valid reference to
+# the Git commit from which to generate the snapshot. The name for the
+# generated ZIP archive will be «basename»-«commit».zip, and the name
+# of the top-level directory within the archive will be taken from the
+# last component of «basename». The rest of the arguments specify the
+# names of the files/directories to include in the archive. Directory
+# names are recognized as ending with a slash; names that do not end
+# with a slash are treated as filenames. Valid «options» are as follows:
+#
+#     -m «manifest-file»
+#     -M «manifest-file»
+#        alternative way of specifying the files/directories to
+#        include in the archive. «manifest-file» is the name of a file
+#        conforming to the MANIFEST.in syntax, as documented at
+#        <https://packaging.python.org/guides/using-manifest-in/>.
+#        The -m version of this option looks at an actual file with
+#        that name; the -M version looks for the version in the commit
+#        history that is current as of the specified commit.
+#     -y
+#        overwrite any existing output archive file. If not specified,
+#        then an error is raised if the output file already exists.
+#
+# For example, the command
+#
+#     zip-dist release v1.0 fred.py tools/
+#     python -m zip_dist.py MANIFEST.in XNALaraMesh v2.0.2
+#
+# will make an archive for the commit tagged “v1.0” (assuming it
+# exists) under the name “release-v1.0.zip”, which contains “fred.py”
+# and all the files under the “tools/” subdirectory. All items in the
+# archive will have the prefix “release/” prefixed to their paths.
+#
+# Copyright 2020 by Lawrence D'Oliveiro <ldo@geek-central.gen.nz>.
+# Licensed under CC-BY <http://creativecommons.org/licenses/by/4.0/>.
+# -
+
+import sys
+import os
+import time
+import re
+import subprocess
+import zipfile
+import getopt
+
+# +
+# Useful stuff
+# -
+
+
+def git(*args):
+    # convenience routine for simplifying git command calls.
+    return \
+        subprocess.check_output(("dir",) + args)
+# end git
+
+
+def parse_manifest(contents):
+    # parses a string which has the format of the contents of a MANIFEST.in
+    # file. Returns a list of («include», «pattern») tuples where «include»
+    # is True to include a file if it matches «pattern», False to exclude it.
+
+    def tokenize_line(s):
+        result = []
+        cur_token = None
+        while len(s) != 0:
+            pos1 = s.find("\\")
+            pos2 = s.find(" ")
+            if pos1 < 0:
+                pos1 = len(s)
+            # end if
+            if pos2 < 0:
+                pos2 = len(s)
+            # end if
+            if cur_token is None and pos2 != 0:
+                cur_token = ""
+            # end if
+            if pos1 < pos2:
+                if pos1 + 1 == len(s):
+                    raise ValueError("incomplete “\\” sequence")
+                # end if
+                cur_token += s[:pos1 + 2]
+                s = s[pos1 + 2:]
+            else:
+                if pos2 != 0:
+                    cur_token += s[:pos2]
+                    result.append(cur_token)
+                    cur_token = None
+                # end if
+                s = s[pos2 + 1:]
+            # end if
+        # end while
+        return \
+            result
+    # end tokenize_line
+
+    def parse_wildcard(parent, child):
+        # returns a compiled re.Pattern object that will match filenames
+        # according to a given parent directory and child item pattern
+        # that can contain shell-style wildcards.
+
+        def parse_wildcard_path(s, default):
+            # returns an re.Pattern string that matches a given string that
+            # can contain shell-style wildcards.
+            if s is not None:
+                if s.startswith("/"):
+                    raise ValueError("relative pathspecs only")
+                # end if
+                t = ""
+                i = 0
+                cur_set = None
+                while True:
+                    if i == len(s):
+                        if cur_set is not None:
+                            raise ValueError("incomplete “[...]” sequence")
+                        # end if
+                        break
+                    # end if
+                    c = s[i]
+                    i += 1
+                    if c == "\\":
+                        if i == len(s):
+                            raise ValueError("incomplete “\\” sequence")
+                        # end if
+                        c = s[i]
+                        i += 1
+                        if c == "n":
+                            c = "\n"
+                        elif c == "t":
+                            c = "\t"
+                        # end if
+                        c = re.escape(c)
+                    elif cur_set is None and c == "*":
+                        if i < len(s) and s[i] == "*":
+                            i += 1
+                            c = ".*"  # can match “/”
+                        else:
+                            c = "[^\\/]*"
+                        # end if
+                    elif cur_set is None and c == "?":
+                        c = "[^\\/]"
+                    elif cur_set is None and c == "[":
+                        cur_set = ""
+                        c = None
+                    elif cur_set is not None and len(cur_set) == 0 and c == "^":
+                        pass  # include c as-is
+                    elif cur_set is not None and c == "]":
+                        c = "[" + cur_set + "]"
+                        cur_set = None
+                    else:
+                        c = re.escape(c)
+                    # end if
+                    if c is not None:
+                        if cur_set is not None:
+                            cur_set += c
+                        else:
+                            t += c
+                        # end if
+                    # end if
+                # end while
+            else:
+                t = default
+            # end if
+            return \
+                t
+        # end parse_wildcard_path
+
+    # begin parse_wildcard
+        if parent is not None:
+            while parent.endswith("/"):
+                parent = parent[:-1]
+            # end while
+        # end if
+        parent_pat = parse_wildcard_path(parent, "")
+        child_pat = parse_wildcard_path(child, ".*")
+        if parent_pat != "":
+            pat = parent_pat + "\\/(?:.+\\/)*" + child_pat
+        else:
+            pat = child_pat
+        # end if
+        if parent is None:
+            # match filename anywhere in hierarchy
+            pat = "(?:.+\\/)*" + pat
+        # end if
+        return \
+            re.compile("^" + pat + "$", re.DOTALL)
+    # end parse_wildcard
+
+# begin parse_manifest
+    result = []
+    for line in contents.split("\n"):
+        line = line.lstrip()
+        if not line.startswith("#"):
+            items = tokenize_line(line)
+            if len(items) != 0:
+                keyword = items.pop(0)
+                if keyword in ("include", "exclude"):
+                    include = keyword == "include"
+                    for item in items:
+                        result.append((include, parse_wildcard("", item)))
+                    # end for
+                elif keyword in ("recursive-include", "recursive-exclude"):
+                    include = keyword == "recursive-include"
+                    if len(items) < 2:
+                        raise ValueError
+                        (
+                            "required parent directory and at least one child filespec for “%s”"
+                            %
+                            keyword
+                        )
+                    # end if
+                    parent = items.pop(0)
+                    for item in items:
+                        result.append((include, parse_wildcard(parent, item)))
+                    # end for
+                elif keyword in ("global-include", "global-exclude"):
+                    include = keyword == "global-include"
+                    for item in items:
+                        result.append((include, parse_wildcard(None, item)))
+                    # end for
+                elif keyword in ("graft", "prune"):
+                    include = keyword == "graft"
+                    for item in items:
+                        result.append((include, parse_wildcard(item, None)))
+                    # end for
+                else:
+                    raise ValueError("unrecognized manifest keyword “%s”" % keyword)
+                # end if
+            # end if
+        # end if
+    # end for
+    return result
+# end parse_manifest
+
+
+overwrite = False
+manifest_name = None
+versioned_manifest = False
+opts, args = getopt.getopt(
+    sys.argv[1:],
+    "m:M:y",
+    []
+)
+for keyword, value in opts:
+    if keyword == "-m":
+        if manifest_name is not None:
+            raise getopt.GetoptError("only one manifest allowed")
+        # end if
+        manifest_name = value
+        versioned_manifest = False
+    elif keyword == "-M":
+        if manifest_name is not None:
+            raise getopt.GetoptError("only one manifest allowed")
+        # end if
+        manifest_name = value
+        versioned_manifest = True
+    elif keyword == "-y":
+        overwrite = True
+    # end if
+# end for
+if len(args) < 2:
+    raise getopt.GetoptError(
+        "usage: %s [«options»] «zipfilename» «commit» [«file»|«dir»...]" % sys.argv[0]
+    )
+# end if
+outbasename, upto = args[:2]
+including = args[2:]
+
+if (manifest_name is not None) == (len(including) != 0):
+    raise getopt.GetoptError("either specify manifest or files/dirs to include, not both or neither")
+# end if
+if len(including) != 0:
+    if (
+            any(i.startswith("/") for i in including)
+            or any(".." in i or "." in i for f in including for i in (f.split("/"),))
+    ):
+        raise getopt.GetoptError("all included items must have relative paths")
+    # end if
+# end if
+
+tree_entries = []
+for entry in git("ls-tree", "-rz", upto).split(b"\0"):
+    if entry != b"":
+        entry, filepath = entry.decode().split("\t", 1)
+        file_mode, kind, object_hash = entry.split(" ")
+        assert kind == "blob"  # no “tree” entries with -r
+        file_mode = {"100644": 0o100644, "100755": 0o100755}[file_mode]
+        tree_entries.append
+        (
+            {
+                "filepath": filepath,
+                "mode": file_mode,
+                "hash": object_hash,
+            }
+        )
+    # end if
+# endd for
+
+tree_include = []
+if manifest_name is not None:
+    if versioned_manifest:
+        manifest_entry = list(e for e in tree_entries if e["filepath"] == manifest_name)
+        if len(manifest_entry) == 0:
+            raise getopt.GetoptError("no manifest file “%s” in commit history" % manifest_name)
+        # end if
+        assert len(manifest_entry) == 1
+        manifest = parse_manifest(git("show", manifest_entry[0]["hash"]).decode())
+    else:
+        manifest = parse_manifest(open(manifest_name, "rt").read())
+    # end if
+    for entry in tree_entries:
+        filepath = entry["filepath"]
+        includeit = False
+        i = len(manifest)
+        while True:
+            if i == 0:
+                includeit = False
+                break
+            # end if
+            i -= 1
+            do_include, matching = manifest[i]
+            if matching.search(filepath) is not None:
+                includeit = do_include
+                break
+            # end if
+        # end while
+        if includeit:
+            tree_include.append(entry)
+        # end if
+    # end for
+else:
+    for entry in tree_entries:
+        filepath = entry["filepath"]
+        if (
+                filepath in (e for e in including if not e.endswith("/"))
+                or any(filepath.startswith(e) for e in including if e.endswith("/"))
+        ):
+            tree_include.append(entry)
+        # end if
+    # end for
+# end if
+
+if len(tree_include) == 0:
+    raise getopt.GetoptError("no files/dirs to include in archive")
+# end if
+
+earliest = git("rev-list", "--reverse", upto).split(b"\n")[0].strip().decode()
+
+outfilename = "%s-%s.zip" % (outbasename, upto)
+basename = os.path.split(outbasename)[1]
+out = zipfile.ZipFile(outfilename, ("x", "w")[overwrite])
+
+for entry in tree_include:
+    filepath = entry["filepath"]
+    timestamp = \
+        git("log", "--format=%ct", "-n1", "%s..%s" % (earliest, upto), "--", filepath) \
+        .strip()
+    if timestamp == b"":
+        # only occurrence of filename is in first commit
+        timestamp = \
+            git("log", "--format=%ct", "-n1", "--", filepath) \
+            .strip()
+    # end if
+    timestamp = int(timestamp)
+    item = zipfile.ZipInfo()
+    item.filename = "/".join((basename, filepath))
+    item.compress_type = zipfile.ZIP_DEFLATED
+    item.external_attr = entry["mode"] << 16
+    item.date_time = time.gmtime(timestamp)[:6]
+    object_contents = git("show", entry["hash"])
+    out.writestr(item, object_contents)
+# end for
+out.close()
+sys.stdout.write("created archive %s\n" % outfilename)

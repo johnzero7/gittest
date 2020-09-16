@@ -1,0 +1,2 @@
+include *.py icons/*.png
+exclude README.md setup.cfg MANIFEST.in
